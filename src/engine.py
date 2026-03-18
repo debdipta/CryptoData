@@ -1,4 +1,4 @@
-import ccxt
+import requests
 import pandas as pd
 import time
 import os
@@ -8,7 +8,9 @@ from datetime import datetime
 import pyarrow.feather as feather
 from .config import SYMBOL, TIMEFRAME, DATA_DIR
 
-exchange = ccxt.binance()
+headers = {
+    'Accept': 'application/json'
+}
 
 buffer = []
 
@@ -17,44 +19,61 @@ class AlphaExchange(object):
         pass
 
     def __fetch_ohlc(self):
-
         global buffer
 
         try:
+            current_time = int(time.time())
+            # Get data for the last 10 minutes to ensure we get some candles
+            start_time = current_time - 600  # 10 minutes ago
 
-            data = exchange.fetch_ohlcv(
-                SYMBOL,
-                timeframe=TIMEFRAME,
-                limit=1
-            )
+            print(f"[{datetime.now()}] Fetching data from {start_time} to {current_time}")
 
-            if not data:
-                print("No data available. Waiting...")
-                return
+            r = requests.get('https://api.india.delta.exchange/v2/history/candles', params={
+                'resolution': TIMEFRAME,
+                'symbol': SYMBOL.replace('/', ''),  # Remove slash for API
+                'start': str(start_time),
+                'end': str(current_time)
+            }, headers=headers, timeout=10)
 
-            row = data[0]
+            if r.status_code == 200:
+                data = r.json()
+                candles = data.get('result', [])
 
-            record = {
-                "timestamp": datetime.utcfromtimestamp(row[0]/1000),
-                "open": row[1],
-                "high": row[2],
-                "low": row[3],
-                "close": row[4],
-                "volume": row[5]
-            }
+                if not candles:
+                    print(f"[{datetime.now()}] No new candles available. Waiting for next candle...")
+                    return
 
-            buffer.append(record)
+                # Get the latest candle
+                latest_candle = candles[-1]
 
-            print("Fetched:", record)
+                # Convert to our record format
+                # Delta API returns: {'time': timestamp, 'open': open, 'high': high, 'low': low, 'close': close, 'volume': volume}
+                record = {
+                    "timestamp": datetime.fromtimestamp(latest_candle['time']),
+                    "open": latest_candle['open'],
+                    "high": latest_candle['high'],
+                    "low": latest_candle['low'],
+                    "close": latest_candle['close'],
+                    "volume": latest_candle['volume']
+                }
 
-        except ccxt.NetworkError as e:
-            print("Network error:", e)
+                buffer.append(record)
+                print(f"[{datetime.now()}] Fetched: {record}")
 
-        except ccxt.ExchangeError as e:
-            print("Exchange error:", e)
+            else:
+                print(f"[{datetime.now()}] API Error: HTTP {r.status_code} - {r.text}")
+                print(f"[{datetime.now()}] Waiting before retry...")
+                time.sleep(10)  # Wait 10 seconds before retry on API error
+
+        except requests.exceptions.RequestException as e:
+            print(f"[{datetime.now()}] Network error: {e}")
+            print(f"[{datetime.now()}] Waiting before retry...")
+            time.sleep(10)  # Wait 10 seconds before retry on network error
 
         except Exception as e:
-            print("Unknown error:", e)
+            print(f"[{datetime.now()}] Unknown error: {e}")
+            print(f"[{datetime.now()}] Waiting before retry...")
+            time.sleep(10)  # Wait 10 seconds before retry on unknown error
 
     def __save_daily(self):
 
@@ -66,6 +85,11 @@ class AlphaExchange(object):
         try:
 
             df = pd.DataFrame(buffer)
+
+            # Ensure we only keep unique 1-minute candles (by timestamp)
+            if 'timestamp' in df.columns:
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                df = df.drop_duplicates(subset=['timestamp']).sort_values('timestamp').reset_index(drop=True)
 
             date_str = datetime.utcnow().strftime("%Y-%m-%d")
 
