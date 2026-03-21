@@ -3,7 +3,7 @@
 Example usage of the CryptoData loader
 """
 
-from data_loader import DataLoader, load_last_days, list_files
+from data_loader import DataLoader, load_last_days, load_file, list_files
 
 def main():
     print("CryptoData Analysis Example")
@@ -43,6 +43,18 @@ def main():
 
         else:
             print("   No data available for the last 7 days")
+
+        # Load and print options data from the most recent file
+        if files:
+            print("\n5. Options data (from most recent file):")
+            latest_file = files[-1]
+            df2, options = load_file(latest_file)
+            if options:
+                # Print a small sample of the option strikes
+                for strike, data in list(options.items())[:5]:
+                    print(f"   Strike {strike}: Call={data.get('call')} Put={data.get('put')}")
+            else:
+                print("   No options data found in the latest file")
 
     finally:
         # Always cleanup temporary files

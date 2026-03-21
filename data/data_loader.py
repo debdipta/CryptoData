@@ -2,6 +2,7 @@ import pandas as pd
 import tarfile
 import os
 import glob
+import json
 from datetime import datetime
 import pyarrow.feather as feather
 import tempfile
@@ -38,41 +39,57 @@ class DataLoader:
         return sorted(files)
 
     def load_single_file(self, tar_gz_path):
-        """
-        Load data from a single tar.gz file
+        """Load data from a single tar.gz file
 
         Args:
             tar_gz_path (str): Path to the tar.gz file
 
         Returns:
-            pd.DataFrame: DataFrame containing the OHLCV data
+            tuple[pd.DataFrame, dict]: (DataFrame containing OHLCV data, options data dict)
         """
         try:
             # Extract the tar.gz file
             with tarfile.open(tar_gz_path, 'r:gz') as tar:
-                # Get the feather file name (should be the only file)
-                feather_file = tar.getnames()[0]
+                members = tar.getnames()
+                feather_file = None
+                options_file = None
 
-                # Extract to temporary directory
-                tar.extractall(self.temp_dir)
-                extracted_feather = os.path.join(self.temp_dir, feather_file)
+                # Identify expected files
+                for m in members:
+                    if m.endswith('.feather'):
+                        feather_file = m
+                    if m.endswith('_options.json'):
+                        options_file = m
 
-                # Read the feather file
-                df = feather.read_feather(extracted_feather)
+                # Extract and read feather file
+                df = pd.DataFrame()
+                if feather_file:
+                    tar.extract(feather_file, self.temp_dir)
+                    extracted_feather = os.path.join(self.temp_dir, feather_file)
+                    df = feather.read_feather(extracted_feather)
+                    os.remove(extracted_feather)
 
-                # Clean up
-                os.remove(extracted_feather)
+                    # Ensure timestamp is datetime
+                    if 'timestamp' in df.columns:
+                        df['timestamp'] = pd.to_datetime(df['timestamp'])
 
-                # Ensure timestamp is datetime
-                if 'timestamp' in df.columns:
-                    df['timestamp'] = pd.to_datetime(df['timestamp'])
+                # Extract and read options file
+                options_data = {}
+                if options_file:
+                    # Use extractall with explicit member to avoid future tarfile security changes
+                    member = tar.getmember(options_file)
+                    tar.extractall(self.temp_dir, members=[member])
+                    extracted_options = os.path.join(self.temp_dir, options_file)
+                    with open(extracted_options, 'r') as f:
+                        options_data = json.load(f)
+                    os.remove(extracted_options)
 
-                print(f"Loaded {len(df)} records from {tar_gz_path}")
-                return df
+                print(f"Loaded {len(df)} records and options data from {tar_gz_path}")
+                return df, options_data
 
         except Exception as e:
             print(f"Error loading {tar_gz_path}: {e}")
-            return None
+            return None, {}
 
     def load_date_range(self, start_date, end_date, symbol=None):
         """
@@ -197,9 +214,9 @@ class DataLoader:
 def load_file(tar_gz_path):
     """Quick function to load a single tar.gz file"""
     loader = DataLoader()
-    df = loader.load_single_file(tar_gz_path)
+    df, options = loader.load_single_file(tar_gz_path)
     loader.cleanup()
-    return df
+    return df, options
 
 def load_last_days(days=7, symbol=None):
     """Quick function to load data for the last N days"""
@@ -230,12 +247,14 @@ if __name__ == "__main__":
     if files:
         # Load the most recent file
         print(f"\nLoading most recent file: {files[-1]}")
-        df = load_file(files[-1])
+        df, options = load_file(files[-1])
 
-        if df is not None:
+        if df is not None and not df.empty:
             print(f"Data shape: {df.shape}")
             print(f"Columns: {list(df.columns)}")
-            print(f"Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
+
+            if 'timestamp' in df.columns:
+                print(f"Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
 
             # Show all data
             print("\nComplete Data:")
@@ -248,6 +267,19 @@ if __name__ == "__main__":
             loader = DataLoader()
             summary = loader.get_data_summary(df)
             print(f"\nSummary: {summary}")
+
+            # Print options sample
+            if options:
+                print("\nOption data sample:")
+                for strike, data in list(options.items())[:5]:
+                    print(f"  Strike {strike}: Call={data.get('call')} Put={data.get('put')}")
+
             loader.cleanup()
+        else:
+            print("No OHLCV data available in the file.")
+            if options:
+                print("Option data is present:")
+                for strike, data in list(options.items())[:5]:
+                    print(f"  Strike {strike}: Call={data.get('call')} Put={data.get('put')}")
     else:
         print("No tar.gz files found. Run the engine first to collect some data!")
